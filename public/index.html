@@ -195,8 +195,9 @@
       </label>
       <label class="field">
         <span>新主密码（留空 = 关闭加密）</span>
-        <input type="password" id="pwNew" autocomplete="off" placeholder="建议使用较长的密码">
+        <input type="password" id="pwNew" autocomplete="off" placeholder="至少 12 位，建议混合大小写字母、数字、符号">
       </label>
+      <div id="pwNewHint" class="pw-hint hidden"></div>
       <label class="field">
         <span>确认新主密码</span>
         <input type="password" id="pwConfirm" autocomplete="off">
@@ -205,8 +206,9 @@
     <div id="pwEnableFields" class="hidden">
       <label class="field">
         <span>设置主密码</span>
-        <input type="password" id="pwNew2" autocomplete="off" placeholder="建议使用较长的密码">
+        <input type="password" id="pwNew2" autocomplete="off" placeholder="至少 12 位，建议混合大小写字母、数字、符号">
       </label>
+      <div id="pwNew2Hint" class="pw-hint hidden"></div>
       <label class="field">
         <span>确认主密码</span>
         <input type="password" id="pwConfirm2" autocomplete="off">

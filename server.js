@@ -17,6 +17,7 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 const MAX_BODY = 2 * 1024 * 1024; // 2MB
 const TEST_TIMEOUT_MS = 15000;
 const SCRYPT_N = 2 ** 14; // 16MB 内存（OpenSSL 默认 maxmem 32MB 内）
+const MIN_PASSWORD_LEN = 12; // 主密码最短长度
 
 // ---------------- 存储 ----------------
 const state = {
@@ -594,6 +595,11 @@ async function handleApi(req, res, url) {
     const body = await readBody(req);
     const current = String(body.current || '');
     const next = String(body.new || '');
+
+    // 设置/修改主密码（next 非空）时强制最短长度；next 为空表示关闭加密，无需校验
+    if (next !== '' && next.length < MIN_PASSWORD_LEN) {
+      return sendJSON(res, 400, { ok: false, error: `主密码至少需要 ${MIN_PASSWORD_LEN} 个字符` });
+    }
 
     if (state.encrypted) {
       if (!safeEqual(current, state.masterPassword)) return sendJSON(res, 401, { ok: false, error: '当前主密码错误' });

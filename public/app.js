@@ -597,6 +597,32 @@ $('snippetCopy').addEventListener('click', () => copyText($('snippetCode').textC
 $('snippetClose').addEventListener('click', () => $('snippetOverlay').classList.add('hidden'));
 
 // ---------- 主密码设置 ----------
+// 评估密码强度，返回 {label, level}，level: ''(无) | 'weak' | 'medium' | 'strong'
+function passwordStrength(pw) {
+  if (!pw) return { label: '', level: '' };
+  if (pw.length < 12) return { label: '弱 · 长度不足 12 位', level: 'weak' };
+  let score = 0;
+  if (/[a-z]/.test(pw)) score++;
+  if (/[A-Z]/.test(pw)) score++;
+  if (/[0-9]/.test(pw)) score++;
+  if (/[^a-zA-Z0-9]/.test(pw)) score++;
+  if (score <= 1) return { label: '弱 · 建议混合大小写字母、数字、符号', level: 'weak' };
+  if (score <= 2) return { label: '中等', level: 'medium' };
+  return { label: '强', level: 'strong' };
+}
+
+function updatePwHint(inputId, hintId) {
+  const el = $(inputId);
+  const hint = $(hintId);
+  const s = passwordStrength(el.value);
+  if (!s.level) { hint.classList.add('hidden'); hint.textContent = ''; return; }
+  hint.textContent = `密码强度：${s.label}`;
+  hint.className = 'pw-hint ' + s.level;
+}
+
+$('pwNew').addEventListener('input', () => updatePwHint('pwNew', 'pwNewHint'));
+$('pwNew2').addEventListener('input', () => updatePwHint('pwNew2', 'pwNew2Hint'));
+
 $('passwordBtn').addEventListener('click', () => {
   const enc = serverInfo.encrypted;
   $('passwordStateText').textContent = enc
@@ -606,6 +632,7 @@ $('passwordBtn').addEventListener('click', () => {
   $('pwEnableFields').classList.toggle('hidden', enc);
   $('pwError').classList.add('hidden');
   ['pwCurrent', 'pwNew', 'pwConfirm', 'pwNew2', 'pwConfirm2'].forEach((i) => $(i).value = '');
+  ['pwNewHint', 'pwNew2Hint'].forEach((i) => { $(i).classList.add('hidden'); $(i).textContent = ''; });
   $('passwordOverlay').classList.remove('hidden');
 });
 
@@ -616,6 +643,7 @@ $('pwSave').addEventListener('click', async () => {
     if (serverInfo.encrypted) {
       const cur = $('pwCurrent').value;
       const nw = $('pwNew').value;
+      if (nw && nw.length < 12) throw new Error('主密码至少需要 12 个字符');
       if (nw && nw !== $('pwConfirm').value) throw new Error('两次输入的新密码不一致');
       const data = await api('/api/password', { method: 'POST', body: JSON.stringify({ current: cur, new: nw }) });
       serverInfo.encrypted = data.encrypted;
@@ -624,6 +652,7 @@ $('pwSave').addEventListener('click', async () => {
     } else {
       const nw = $('pwNew2').value;
       if (!nw) throw new Error('请输入要设置的主密码');
+      if (nw.length < 12) throw new Error('主密码至少需要 12 个字符');
       if (nw !== $('pwConfirm2').value) throw new Error('两次输入的密码不一致');
       const data = await api('/api/password', { method: 'POST', body: JSON.stringify({ current: '', new: nw }) });
       serverInfo.encrypted = data.encrypted;

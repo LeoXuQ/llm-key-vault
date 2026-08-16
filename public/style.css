@@ -364,3 +364,9 @@ body {
   font-size: 12.5px;
 }
 .field input[type="file"]::file-selector-button:hover { background: var(--primary-hover); }
+
+/* 主密码强度提示 */
+.pw-hint { font-size: 12.5px; margin: -6px 0 10px; }
+.pw-hint.weak { color: var(--red); }
+.pw-hint.medium { color: var(--amber); }
+.pw-hint.strong { color: var(--green); }
