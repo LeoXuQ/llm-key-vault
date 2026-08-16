@@ -23,6 +23,7 @@ const state = {
   entries: [],          // 解密后的条目
   masterPassword: null, // 仅保存在内存中
   encrypted: false,     // 数据文件当前是否加密
+  unlockFails: { count: 0, lockedUntil: 0 }, // 解锁失败计数与冻结时间
 };
 
 function loadFile() {
@@ -135,12 +136,42 @@ function normalizeBaseUrl(url) {
   return u.replace(/\/+$/, '');
 }
 
+// URL 查询字符串脱敏：把指定参数名（携带 API Key）的值替换为 ***，防止 Key 落盘 / 展示
+function redactUrl(rawUrl, params) {
+  if (!rawUrl) return rawUrl;
+  const names = Array.isArray(params) && params.length
+    ? params.map((p) => String(p || '').toLowerCase()).filter(Boolean)
+    : [];
+  if (!names.length) return rawUrl; // 无需脱敏的请求直接返回原 url
+  try {
+    const u = new URL(rawUrl);
+    let changed = false;
+    for (const name of names) {
+      if (u.searchParams.has(name)) {
+        u.searchParams.set(name, '***');
+        changed = true;
+      }
+    }
+    return changed ? u.toString() : rawUrl;
+  } catch {
+    return rawUrl; // 解析失败（不应发生，req.url 已是 http(s)），保守返回原值
+  }
+}
+
 function isOpenAIish(provider) {
   return ['openai', 'deepseek', 'moonshot', 'zhipu', 'qwen', 'siliconflow', 'openrouter', 'other-openai'].includes(provider);
 }
 
 function genId() {
   return crypto.randomBytes(8).toString('hex');
+}
+
+// 常量时间比较，避免对主密码做明文 !== 比较引入时序侧信道
+function safeEqual(a, b) {
+  const ab = Buffer.from(String(a));
+  const bb = Buffer.from(String(b));
+  if (ab.length !== bb.length) return false;
+  return crypto.timingSafeEqual(ab, bb);
 }
 
 // ---------------- 测试请求 ----------------
@@ -169,6 +200,7 @@ function buildTestRequests(entry) {
     const mk = (b) => ({
       url: `${b}/models?key=${encodeURIComponent(key)}`,
       options: { method: 'GET', headers: { 'User-Agent': 'llm-key-vault' } },
+      redactParams: ['key'], // URL 携带 key，落盘前需脱敏
     });
     if (base.endsWith('/v1beta')) return [mk(base), mk(base.replace(/\/v1beta$/, '/v1'))];
     if (base.endsWith('/v1')) return [mk(base), mk(base.replace(/\/v1$/, '/v1beta'))];
@@ -190,7 +222,7 @@ function buildTestRequests(entry) {
     const body = tc.body ? String(tc.body) : undefined;
     const options = { method, headers };
     if (body) options.body = body;
-    return [{ url, options }];
+    return [{ url, options, redactParams: tc.authMode === 'query' ? [tc.queryParam || 'api_key'] : [] }];
   }
 
   // 默认：OpenAI 兼容
@@ -216,14 +248,14 @@ async function runTest(entry) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), TEST_TIMEOUT_MS);
     try {
-      const resp = await fetch(req.url, { ...req.options, signal: controller.signal });
+      const resp = await fetch(req.url, { ...req.options, redirect: 'manual', signal: controller.signal });
       const latencyMs = Date.now() - started;
       const text = await resp.text().catch(() => '');
       const result = {
         ok: resp.status >= 200 && resp.status < 300,
         status: resp.status,
         statusText: resp.statusText || '',
-        url: req.url,
+        url: redactUrl(req.url, req.redactParams),
         latencyMs,
         authFailed: resp.status === 401 || resp.status === 403,
         bodyPreview: previewBody(text),
@@ -235,7 +267,7 @@ async function runTest(entry) {
     } catch (err) {
       const latencyMs = Date.now() - started;
       const reason = err.name === 'AbortError' ? '请求超时' : (err.cause ? err.cause.code || err.message : err.message);
-      attempts.push({ ok: false, url: req.url, latencyMs, error: reason });
+      attempts.push({ ok: false, url: redactUrl(req.url, req.redactParams), latencyMs, error: reason });
       if (err.name === 'AbortError') return attempts[attempts.length - 1];
       // DNS/连接类错误：不再尝试第二个候选地址
       if (err.cause && ['ENOTFOUND', 'ECONNREFUSED', 'ECONNRESET', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH'].includes(err.cause.code)) {
@@ -320,6 +352,12 @@ async function handleApi(req, res, url) {
   }
 
   if (p === '/api/unlock' && req.method === 'POST') {
+    // 冻结期内直接拒绝
+    if (state.unlockFails.lockedUntil > 0 && Date.now() < state.unlockFails.lockedUntil) {
+      const retryAfterSec = Math.ceil((state.unlockFails.lockedUntil - Date.now()) / 1000);
+      const mins = Math.ceil(retryAfterSec / 60);
+      return sendJSON(res, 429, { ok: false, error: `尝试次数过多，请约 ${mins} 分钟后再试`, retryAfterSec });
+    }
     const body = await readBody(req);
     if (!state.encrypted) return sendJSON(res, 200, { ok: true, entries: state.entries, alreadyPlain: true });
     let plain = null;
@@ -328,10 +366,21 @@ async function handleApi(req, res, url) {
     } catch {
       plain = null; // GCM 校验失败 => 密码错误
     }
-    if (!plain) return sendJSON(res, 401, { ok: false, error: '主密码错误' });
-    state.entries = Array.isArray(plain.entries) ? plain.entries : [];
-    state.masterPassword = String(body.password);
-    return sendJSON(res, 200, { ok: true, entries: state.entries });
+    if (plain) {
+      state.entries = Array.isArray(plain.entries) ? plain.entries : [];
+      state.masterPassword = String(body.password);
+      state.unlockFails = { count: 0, lockedUntil: 0 };
+      return sendJSON(res, 200, { ok: true, entries: state.entries });
+    }
+    // 解密失败
+    state.unlockFails.count += 1;
+    if (state.unlockFails.count >= 3) {
+      state.unlockFails.lockedUntil = Date.now() + 5 * 60 * 1000;
+      state.unlockFails.count = 0;
+      return sendJSON(res, 429, { ok: false, error: '密码错误次数过多，已冻结 5 分钟', retryAfterSec: 300 });
+    }
+    const remaining = 3 - state.unlockFails.count;
+    return sendJSON(res, 401, { ok: false, error: `主密码错误（剩余 ${remaining} 次尝试机会）` });
   }
 
   if (p === '/api/lock' && req.method === 'POST') {
@@ -418,7 +467,7 @@ async function handleApi(req, res, url) {
     const next = String(body.new || '');
 
     if (state.encrypted) {
-      if (current !== state.masterPassword) return sendJSON(res, 401, { ok: false, error: '当前主密码错误' });
+      if (!safeEqual(current, state.masterPassword)) return sendJSON(res, 401, { ok: false, error: '当前主密码错误' });
       if (next === '') {
         // 关闭加密
         state.encrypted = false;
