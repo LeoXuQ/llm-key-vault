@@ -281,6 +281,134 @@ async function runTest(entry) {
   return last || { ok: false, error: '无法发起请求' };
 }
 
+// ---------------- 深度测试 / 模型列表 ----------------
+// 构造最小推理请求（验证 Key 能真实调用而非仅能列模型）。鉴权规则与 buildTestRequests 一致。
+function buildChatRequest(entry) {
+  const base = normalizeBaseUrl(entry.baseUrl);
+  if (!base) return null;
+  const provider = entry.provider || 'openai';
+  const key = entry.apiKey || '';
+  const model = entry.model || '';
+  const hdrUA = { 'User-Agent': 'llm-key-vault' };
+
+  if (provider === 'anthropic') {
+    const b = base.endsWith('/v1') ? base : `${base}/v1`;
+    return {
+      url: `${b}/messages`,
+      options: {
+        method: 'POST',
+        headers: { ...hdrUA, 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+        body: JSON.stringify({ model, max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
+      },
+      redactParams: [],
+    };
+  }
+  if (provider === 'gemini') {
+    const m = model || 'gemini-1.5-flash';
+    return {
+      url: `${base}/v1beta/models/${encodeURIComponent(m)}:generateContent?key=${encodeURIComponent(key)}`,
+      options: { method: 'POST', headers: { ...hdrUA, 'content-type': 'application/json' }, body: JSON.stringify({ contents: [{ parts: [{ text: 'hi' }] }] }) },
+      redactParams: ['key'],
+    };
+  }
+  if (provider === 'custom') {
+    // custom 实现各异，深度测试沿用 testConfig 跑一次（等同浅测但用 testConfig 的 method/body）。
+    const reqs = buildTestRequests(entry);
+    return reqs && reqs[0] ? reqs[0] : null;
+  }
+  // OpenAI 兼容
+  const b = base.endsWith('/v1') ? base : `${base}/v1`;
+  if (!model) return { __error: '深度测试需先设置默认模型' };
+  return {
+    url: `${b}/chat/completions`,
+    options: {
+      method: 'POST',
+      headers: { ...hdrUA, Authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ model, messages: [{ role: 'user', content: 'hi' }], max_tokens: 1, stream: false }),
+    },
+    redactParams: [],
+  };
+}
+
+// 发起一次请求（与 runTest 一致的超时/重定向/脱敏处理），返回与 runTest 同 shape 的结果
+async function runSingleRequest(req) {
+  const started = Date.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TEST_TIMEOUT_MS);
+  try {
+    const resp = await fetch(req.url, { ...req.options, redirect: 'manual', signal: controller.signal });
+    const latencyMs = Date.now() - started;
+    const text = await resp.text().catch(() => '');
+    return {
+      ok: resp.status >= 200 && resp.status < 300,
+      status: resp.status,
+      statusText: resp.statusText || '',
+      url: redactUrl(req.url, req.redactParams),
+      latencyMs,
+      authFailed: resp.status === 401 || resp.status === 403,
+      bodyPreview: previewBody(text),
+    };
+  } catch (err) {
+    const latencyMs = Date.now() - started;
+    const reason = err.name === 'AbortError' ? '请求超时' : (err.cause ? err.cause.code || err.message : err.message);
+    return { ok: false, url: redactUrl(req.url, req.redactParams), latencyMs, error: reason };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function runDeepTest(entry) {
+  if (!entry.apiKey) return { ok: false, error: 'API Key 为空' };
+  const req = buildChatRequest(entry);
+  if (!req) return { ok: false, error: 'Base URL 无效（必须以 http:// 或 https:// 开头）' };
+  if (req.__error) return { ok: false, error: req.__error };
+  return runSingleRequest(req);
+}
+
+// 从响应 JSON 中解析模型标识列表（兼容 OpenAI/Anthropic 的 data[].id 与 Gemini 的 models[].name）
+function parseModelsList(obj) {
+  if (!obj || typeof obj !== 'object') return [];
+  const norm = (s) => String(s || '').replace(/^models\//, '').trim(); // gemini 返回 "models/gemini-1.5-flash"，剥离前缀
+  const pick = (arr) => (Array.isArray(arr) ? arr.map((m) => norm(m && (m.id || m.name))).filter(Boolean) : []);
+  if (Array.isArray(obj.data)) return pick(obj.data);
+  if (Array.isArray(obj.models)) return pick(obj.models);
+  return [];
+}
+
+async function runModelsFetch(entry) {
+  if (!entry.apiKey) return { ok: false, error: 'API Key 为空' };
+  if (entry.provider === 'custom') return { ok: false, error: '自定义请求不支持获取模型列表' };
+  const reqs = buildTestRequests(entry);
+  if (!reqs) return { ok: false, error: 'Base URL 无效' };
+  let lastErr = null;
+  for (const req of reqs) {
+    // 只对 /models 端点取模型；gemini 的 url 形如 /models?key=
+    if (!/\/models(\?|$)/.test(req.url)) continue;
+    const started = Date.now();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TEST_TIMEOUT_MS);
+    try {
+      const resp = await fetch(req.url, { ...req.options, redirect: 'manual', signal: controller.signal });
+      const latencyMs = Date.now() - started;
+      if (resp.status === 401 || resp.status === 403) {
+        return { ok: false, error: 'API Key 无效（401/403）', authFailed: true };
+      }
+      if (resp.status < 200 || resp.status >= 300) { lastErr = `HTTP ${resp.status}`; continue; }
+      const text = await resp.text().catch(() => '');
+      let obj;
+      try { obj = JSON.parse(text); } catch { lastErr = '响应不是合法 JSON'; continue; }
+      const models = parseModelsList(obj);
+      if (!models.length) { lastErr = '响应中未找到模型'; continue; }
+      return { ok: true, models };
+    } catch (err) {
+      lastErr = err.name === 'AbortError' ? '请求超时' : (err.cause ? err.cause.code || err.message : err.message);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return { ok: false, error: lastErr || '未能获取模型列表' };
+}
+
 function previewBody(text) {
   if (!text) return '';
   try {
@@ -448,6 +576,7 @@ async function handleApi(req, res, url) {
       if (idx >= 0) {
         state.entries[idx].lastTest = {
           at: new Date().toISOString(),
+          kind: 'shallow',
           ok: result.ok,
           status: result.status || null,
           latencyMs: result.latencyMs || null,
@@ -485,6 +614,105 @@ async function handleApi(req, res, url) {
       persist();
       return sendJSON(res, 200, { ok: true, encrypted: true, message: '已开启主密码加密' });
     }
+  }
+
+  if (p === '/api/test-deep' && req.method === 'POST') {
+    const body = await readBody(req);
+    let entry;
+    if (body.id) {
+      requireUnlocked();
+      entry = state.entries.find((e) => e.id === body.id);
+      if (!entry) return sendJSON(res, 404, { ok: false, error: '条目不存在' });
+    } else {
+      entry = body.entry || body;
+    }
+    if (!entry || !entry.baseUrl || !entry.apiKey) {
+      return sendJSON(res, 400, { ok: false, error: '缺少 baseUrl 或 apiKey' });
+    }
+    const result = await runDeepTest(entry);
+    if (body.id && state.entries.length) {
+      const idx = state.entries.findIndex((e) => e.id === body.id);
+      if (idx >= 0) {
+        state.entries[idx].lastTest = {
+          at: new Date().toISOString(),
+          kind: 'deep',
+          ok: result.ok,
+          status: result.status || null,
+          latencyMs: result.latencyMs || null,
+          error: result.error || null,
+          url: result.url || null,
+        };
+        persist();
+      }
+    }
+    return sendJSON(res, 200, { ok: result.ok, result });
+  }
+
+  if (p === '/api/models' && req.method === 'POST') {
+    const body = await readBody(req);
+    let entry;
+    if (body.id) {
+      requireUnlocked();
+      entry = state.entries.find((e) => e.id === body.id);
+      if (!entry) return sendJSON(res, 404, { ok: false, error: '条目不存在' });
+    } else {
+      entry = body.entry || body;
+    }
+    if (!entry || !entry.baseUrl || !entry.apiKey) {
+      return sendJSON(res, 400, { ok: false, error: '缺少 baseUrl 或 apiKey' });
+    }
+    const result = await runModelsFetch(entry);
+    return sendJSON(res, 200, result);
+  }
+
+  if (p === '/api/export' && req.method === 'POST') {
+    requireUnlocked();
+    const body = await readBody(req);
+    const password = String(body.password || '');
+    if (!password) return sendJSON(res, 400, { ok: false, error: '请输入导出密码' });
+    const payload = encryptJson({ entries: state.entries }, password);
+    const content = JSON.stringify(payload, null, 2);
+    return sendJSON(res, 200, { ok: true, content });
+  }
+
+  if (p === '/api/import' && req.method === 'POST') {
+    requireUnlocked();
+    const body = await readBody(req);
+    const content = String(body.content || '');
+    const password = String(body.password || '');
+    const mode = body.mode === 'replace' ? 'replace' : 'merge';
+    if (!content || !password) return sendJSON(res, 400, { ok: false, error: '缺少文件内容或密码' });
+    let plain;
+    try {
+      plain = decryptJson(JSON.parse(content), password);
+    } catch {
+      plain = null;
+    }
+    if (!plain || !Array.isArray(plain.entries)) {
+      return sendJSON(res, 401, { ok: false, error: '解密失败：密码错误或文件已损坏' });
+    }
+    const incoming = plain.entries.filter((e) => e && e.id && e.apiKey && e.baseUrl);
+    const before = state.entries.length;
+    let added;
+    if (mode === 'replace') {
+      state.entries = incoming;
+      added = incoming.length;
+    } else {
+      // merge：按 id 去重，已存在的跳过
+      const existing = new Set(state.entries.map((e) => e.id));
+      added = 0;
+      for (const e of incoming) if (!existing.has(e.id)) { state.entries.unshift(e); added += 1; }
+    }
+    persist();
+    let skippedTip = '';
+    if (mode === 'merge' && added < incoming.length) skippedTip = `，跳过 ${incoming.length - added} 条已存在`;
+    return sendJSON(res, 200, {
+      ok: true,
+      imported: added,
+      total: state.entries.length,
+      skipped: mode === 'merge' ? incoming.length - added : 0,
+      skippedTip,
+    });
   }
 
   return sendJSON(res, 404, { ok: false, error: 'Not Found' });

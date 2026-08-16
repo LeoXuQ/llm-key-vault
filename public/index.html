@@ -47,6 +47,9 @@
       <input type="text" id="searchInput" placeholder="搜索名称 / URL / 备注…">
     </div>
     <select id="providerFilter" class="select"></select>
+    <button class="btn" id="testAllBtn" title="对当前筛选结果逐个浅测并汇总">⚡ 测试全部</button>
+    <button class="btn" id="exportBtn" title="导出为加密文件备份/迁移">⬆ 导出</button>
+    <button class="btn" id="importBtn" title="从加密文件导入条目">⬇ 导入</button>
     <button class="btn primary" id="addBtn">＋ 添加 API Key</button>
   </div>
 
@@ -91,7 +94,11 @@
 
     <label class="field">
       <span>默认模型（可选，用于生成代码示例）</span>
-      <input type="text" id="fModel" placeholder="例如：deepseek-chat" spellcheck="false">
+      <div class="input-with-btn">
+        <input type="text" id="fModel" list="modelList" placeholder="例如：deepseek-chat" spellcheck="false">
+        <button class="btn ghost" id="fFetchModels" title="从当前配置拉取可用模型">📋 获取模型列表</button>
+      </div>
+      <datalist id="modelList"></datalist>
     </label>
 
     <label class="field">
@@ -215,6 +222,55 @@
 
 <!-- Toast -->
 <div id="toasts" class="toasts"></div>
+
+<!-- 导出弹窗 -->
+<div id="exportOverlay" class="overlay hidden">
+  <div class="modal">
+    <div class="modal-title">⬆ 导出条目</div>
+    <p class="muted small">导出文件将用你指定的密码加密保存，<strong>与主密码无关</strong>。请妥善保管导出密码，忘记将无法导入。</p>
+    <label class="field">
+      <span>导出密码 <em class="req">*</em></span>
+      <input type="password" id="exportPw" autocomplete="off" placeholder="为本次导出设置一个密码">
+    </label>
+    <label class="field">
+      <span>确认导出密码 <em class="req">*</em></span>
+      <input type="password" id="exportPw2" autocomplete="off">
+    </label>
+    <div id="exportError" class="error-text hidden"></div>
+    <div class="modal-actions">
+      <button class="btn ghost" id="exportCancel">取消</button>
+      <button class="btn primary" id="exportSave">导出并下载</button>
+    </div>
+  </div>
+</div>
+
+<!-- 导入弹窗 -->
+<div id="importOverlay" class="overlay hidden">
+  <div class="modal">
+    <div class="modal-title">⬇ 导入条目</div>
+    <label class="field">
+      <span>选择导出文件 <em class="req">*</em></span>
+      <input type="file" id="importFile" accept="application/json,.json">
+    </label>
+    <label class="field">
+      <span>该文件的导出密码 <em class="req">*</em></span>
+      <input type="password" id="importPw" autocomplete="off">
+    </label>
+    <label class="field">
+      <span>导入方式</span>
+      <select id="importMode">
+        <option value="merge">合并（跳过已存在的相同 id 条目）</option>
+        <option value="replace">替换（清空当前所有条目，用文件内容覆盖）</option>
+      </select>
+    </label>
+    <div id="importError" class="error-text hidden"></div>
+    <div id="importInfo" class="error-text hidden" style="color:var(--green)"></div>
+    <div class="modal-actions">
+      <button class="btn ghost" id="importCancel">取消</button>
+      <button class="btn primary" id="importSave">导入</button>
+    </div>
+  </div>
+</div>
 
 <script src="app.js"></script>
 </body>

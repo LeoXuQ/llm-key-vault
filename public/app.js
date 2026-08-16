@@ -65,7 +65,13 @@ function toast(msg, type = '') {
   setTimeout(() => t.remove(), 3200);
 }
 
+// 剪贴板 30 秒自动清空：避免敏感内容常驻剪贴板。若期间又复制了别的内容，
+// 旧定时器作废、以新复制内容重新计时（不会误清新复制的内容）。
+let clipboardTimer = null;
+let clipboardClearPending = null; // 正在等待清空的内容，用于判断是否被覆盖
+
 async function copyText(text, tip = '已复制') {
+  const wasPending = clipboardClearPending;
   try {
     await navigator.clipboard.writeText(text);
   } catch {
@@ -78,7 +84,20 @@ async function copyText(text, tip = '已复制') {
     document.execCommand('copy');
     ta.remove();
   }
-  toast(tip, 'ok');
+  // 若上一次复制还在等待清空，本次会覆盖剪贴板 → 旧的清空调用应失效
+  if (clipboardTimer) { clearTimeout(clipboardTimer); clipboardTimer = null; }
+  // 启动 30s 后清空（对所有经 copyText 的内容一视同仁，含 Key/URL/完整地址/代码）
+  clipboardClearPending = text;
+  const captured = text;
+  clipboardTimer = setTimeout(async () => {
+    // 仅当本次复制内容仍是被等待清除的（即用户没有再复制别的）才清空
+    if (clipboardClearPending === captured) {
+      try { await navigator.clipboard.writeText(''); } catch { /* ignore */ }
+      clipboardClearPending = null;
+    }
+    clipboardTimer = null;
+  }, 30000);
+  toast(`${tip}（30 秒后自动清空剪贴板）`, 'ok');
 }
 
 function maskKey(key) {
@@ -186,10 +205,11 @@ function filteredEntries() {
 function testStatusHtml(e) {
   const t = e.lastTest;
   if (!t) return '<div class="test-status"><span class="dot"></span>尚未测试</div>';
+  const tag = t.kind === 'deep' ? '🔬 深度测试' : '🧪 测试';
   if (t.ok) {
-    return `<div class="test-status"><span class="dot ok"></span>✅ 连通正常 · ${t.status || ''} · ${fmtLatency(t.latencyMs)} · ${esc(t.url || '')}</div>`;
+    return `<div class="test-status"><span class="dot ok"></span>✅ ${tag}正常 · ${t.status || ''} · ${fmtLatency(t.latencyMs)} · ${esc(t.url || '')}</div>`;
   }
-  return `<div class="test-status"><span class="dot fail"></span>❌ 测试失败${t.status ? ' · HTTP ' + t.status : ''}${t.latencyMs ? ' · ' + fmtLatency(t.latencyMs) : ''}</div>`;
+  return `<div class="test-status"><span class="dot fail"></span>❌ ${tag}失败${t.status ? ' · HTTP ' + t.status : ''}${t.latencyMs ? ' · ' + fmtLatency(t.latencyMs) : ''}</div>`;
 }
 
 function render() {
@@ -227,7 +247,8 @@ function render() {
       <div class="test-detail hidden" id="detail-${e.id}">${esc(detail)}</div>
 
       <div class="card-actions">
-        <button class="btn sm" data-act="test" data-id="${e.id}">🧪 测试</button>
+        <button class="btn sm" data-act="test" data-id="${e.id}" title="列模型连通性测试（免费）">🧪 测试</button>
+        <button class="btn sm" data-act="testDeep" data-id="${e.id}" title="向推理端点发最小请求（真实调用，需设默认模型）">🔬 深度</button>
         <button class="btn sm" data-act="copyFull" data-id="${e.id}" title="复制完整调用地址">🔗 完整地址</button>
         <button class="btn sm" data-act="snippet" data-id="${e.id}">📜 代码</button>
       </div>
@@ -247,6 +268,7 @@ cardList.addEventListener('click', async (ev) => {
   if (!entry) return;
 
   if (act === 'test') return runTest(entry);
+  if (act === 'testDeep') return runTest(entry, 'deep');
   if (act === 'copyKey') return copyText(entry.apiKey, 'API Key 已复制');
   if (act === 'copyUrl') return copyText(entry.baseUrl, 'Base URL 已复制');
   if (act === 'copyFull') return copyText(chatUrl(entry), '完整调用地址已复制');
@@ -271,29 +293,31 @@ cardList.addEventListener('click', async (ev) => {
 });
 
 // ---------- 测试 ----------
-async function runTest(entry, saveResult = true) {
+async function runTest(entry, mode = 'shallow', saveResult = true) {
   const statusEl = $(`status-${entry.id}`);
   const detailEl = $(`detail-${entry.id}`);
-  if (statusEl) statusEl.innerHTML = '<span class="dot testing"></span>正在测试…';
+  const tagLabel = mode === 'deep' ? '深度测试' : '测试';
+  if (statusEl) statusEl.innerHTML = `<span class="dot testing"></span>${tagLabel}中…`;
   if (detailEl) detailEl.classList.add('hidden');
+  const endpoint = mode === 'deep' ? '/api/test-deep' : '/api/test';
   try {
-    const data = await api('/api/test', {
+    const data = await api(endpoint, {
       method: 'POST',
       body: JSON.stringify(saveResult ? { id: entry.id } : { entry }),
     });
     const r = data.result;
     if (saveResult) {
       const idx = entries.findIndex((e) => e.id === entry.id);
-      if (idx >= 0) entries[idx].lastTest = r;
+      if (idx >= 0) entries[idx].lastTest = { ...r, kind: mode === 'deep' ? 'deep' : 'shallow' };
     }
     if (r.ok) {
-      toast(`✅ ${entry.name}: 连通正常 (HTTP ${r.status}, ${fmtLatency(r.latencyMs)})`, 'ok');
+      toast(`✅ ${entry.name}: ${tagLabel}正常 (HTTP ${r.status}, ${fmtLatency(r.latencyMs)})`, 'ok');
     } else if (r.authFailed) {
-      toast(`❌ ${entry.name}: API Key 无效 (HTTP 401/403)`, 'fail');
+      toast(`❌ ${entry.name}: ${tagLabel}失败 · API Key 无效 (HTTP 401/403)`, 'fail');
     } else if (r.error) {
-      toast(`❌ ${entry.name}: ${r.error}`, 'fail');
+      toast(`❌ ${entry.name}: ${tagLabel}失败 · ${r.error}`, 'fail');
     } else {
-      toast(`❌ ${entry.name}: HTTP ${r.status}`, 'fail');
+      toast(`❌ ${entry.name}: ${tagLabel}失败 · HTTP ${r.status}`, 'fail');
     }
     if (saveResult) render();
     return r;
@@ -301,7 +325,7 @@ async function runTest(entry, saveResult = true) {
     if (saveResult) {
       const idx = entries.findIndex((x) => x.id === entry.id);
       if (idx >= 0) {
-        entries[idx].lastTest = { ok: false, error: e.message };
+        entries[idx].lastTest = { ok: false, kind: mode === 'deep' ? 'deep' : 'shallow', error: e.message };
         render();
       }
     }
@@ -408,7 +432,7 @@ $('draftTestBtn').addEventListener('click', async () => {
   res.className = 'inline-test-result';
   try {
     const entry = collectEntryForm();
-    const r = await runTest(entry, false);
+    const r = await runTest(entry, 'shallow', false);
     res.textContent = r.ok
       ? `✅ 连通正常 (HTTP ${r.status}, ${fmtLatency(r.latencyMs)})`
       : `❌ ${r.authFailed ? 'API Key 无效 (401/403)' : (r.error || 'HTTP ' + r.status)}`;
@@ -616,6 +640,119 @@ $('pwSave').addEventListener('click', async () => {
 // ---------- 搜索 / 过滤 ----------
 $('searchInput').addEventListener('input', (e) => { searchText = e.target.value.trim(); render(); });
 $('providerFilter').addEventListener('change', (e) => { providerFilter = e.target.value; render(); });
+
+// ---------- 获取模型列表 ----------
+$('fFetchModels').addEventListener('click', async () => {
+  const btn = $('fFetchModels');
+  const res = $('draftTestResult');
+  btn.disabled = true;
+  res.textContent = '获取中…';
+  res.className = 'inline-test-result';
+  try {
+    const entry = collectEntryForm();
+    if (!entry.baseUrl.trim()) throw new Error('请先填写 Base URL');
+    if (!entry.apiKey.trim()) throw new Error('请先填写 API Key');
+    const data = await api('/api/models', { method: 'POST', body: JSON.stringify({ entry }) });
+    if (!data.ok || !Array.isArray(data.models) || !data.models.length) {
+      throw new Error(data.error || '未获取到模型');
+    }
+    const dl = $('modelList');
+    dl.innerHTML = data.models.map((m) => `<option value="${esc(m)}"></option>`).join('');
+    // 若当前输入为空，自动填入第一个模型
+    if (!$('fModel').value.trim()) $('fModel').value = data.models[0];
+    res.textContent = `✅ 获取到 ${data.models.length} 个模型`;
+    res.className = 'inline-test-result ok';
+  } catch (e) {
+    res.textContent = '❌ ' + e.message;
+    res.className = 'inline-test-result fail';
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// ---------- 一键测试全部（浅测，串行） ----------
+$('testAllBtn').addEventListener('click', async () => {
+  const list = filteredEntries();
+  if (!list.length) { toast('当前筛选结果为空，无可测试条目', 'fail'); return; }
+  const btn = $('testAllBtn');
+  btn.disabled = true;
+  const origText = btn.textContent;
+  let ok = 0, fail = 0;
+  for (let i = 0; i < list.length; i++) {
+    btn.textContent = `测试中 ${i + 1}/${list.length}`;
+    const r = await runTest(list[i], 'shallow', true);
+    if (r && r.ok) ok += 1; else fail += 1;
+  }
+  btn.textContent = origText;
+  btn.disabled = false;
+  toast(`测试完成：成功 ${ok} / 失败 ${fail}`, ok === list.length ? 'ok' : 'fail');
+});
+
+// ---------- 导出 ----------
+$('exportBtn').addEventListener('click', () => {
+  $('exportPw').value = ''; $('exportPw2').value = '';
+  $('exportError').classList.add('hidden');
+  $('exportOverlay').classList.remove('hidden');
+});
+$('exportCancel').addEventListener('click', () => $('exportOverlay').classList.add('hidden'));
+$('exportSave').addEventListener('click', async () => {
+  try {
+    const pw = $('exportPw').value;
+    if (!pw) throw new Error('请输入导出密码');
+    if (pw !== $('exportPw2').value) throw new Error('两次输入的密码不一致');
+    const data = await api('/api/export', { method: 'POST', body: JSON.stringify({ password: pw }) });
+    const blob = new Blob([data.content], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `llm-key-vault-export-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(a.href);
+    $('exportOverlay').classList.add('hidden');
+    toast('已导出加密文件', 'ok');
+  } catch (e) {
+    $('exportError').textContent = e.message;
+    $('exportError').classList.remove('hidden');
+  }
+});
+
+// ---------- 导入 ----------
+$('importBtn').addEventListener('click', () => {
+  $('importFile').value = ''; $('importPw').value = '';
+  $('importMode').value = 'merge';
+  $('importError').classList.add('hidden');
+  $('importInfo').classList.add('hidden');
+  $('importOverlay').classList.remove('hidden');
+});
+$('importCancel').addEventListener('click', () => $('importOverlay').classList.add('hidden'));
+$('importSave').addEventListener('click', () => {
+  const file = $('importFile').files && $('importFile').files[0];
+  if (!file) { $('importError').textContent = '请选择导出文件'; $('importError').classList.remove('hidden'); return; }
+  const pw = $('importPw').value;
+  if (!pw) { $('importError').textContent = '请输入该文件的导出密码'; $('importError').classList.remove('hidden'); return; }
+  const reader = new FileReader();
+  reader.onload = async () => {
+    try {
+      const data = await api('/api/import', {
+        method: 'POST',
+        body: JSON.stringify({ content: String(reader.result), password: pw, mode: $('importMode').value }),
+      });
+      await loadEntries();
+      $('importInfo').textContent = `导入成功：新增 ${data.imported} 条${data.skipped ? `，跳过 ${data.skipped} 条已存在` : ''}，当前共 ${data.total} 条`;
+      $('importInfo').classList.remove('hidden');
+      toast('导入成功', 'ok');
+    } catch (e) {
+      $('importError').textContent = e.message;
+      $('importError').classList.remove('hidden');
+    }
+  };
+  reader.onerror = () => {
+    $('importError').textContent = '读取文件失败';
+    $('importError').classList.remove('hidden');
+  };
+  reader.readAsText(file);
+});
 
 // 点击遮罩空白处关闭弹窗
 document.querySelectorAll('.overlay').forEach((ov) => {
