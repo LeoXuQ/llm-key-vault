@@ -24,6 +24,11 @@ node tests/check-ids.js     # 校验 app.js 中 $('xxx') 引用的 DOM id 是否
 
 环境变量：`KV_PORT`（默认 `3210`）、`KV_HOST`（默认 `127.0.0.1`）、`KV_DATA_FILE`（默认 `./data/keys.json`）。
 
+## 工作流约定
+
+- 开发在 `dev` 分支上进行，`main` 保持稳定；功能稳定后合并回 `main`。
+- **每次任务完整完成（改动 + 验证通过）后，自动执行 `git add -A`、`git commit`（中文说明，带 `Co-Authored-By` 署名）并 `git push` 到远程当前分支，无需等待用户再次确认。**
+
 ## 架构
 
 前后端通过 HTTP JSON API 通信，所有 `/api/*` 路由由 [server.js](server.js) 处理，其余路径由 `serveStatic` 从 `public/` 提供静态文件。
