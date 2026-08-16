@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLM API Key Vault</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔑</text></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- 解锁遮罩 -->
+<div id="unlockOverlay" class="overlay hidden">
+  <div class="modal unlock-card">
+    <div class="modal-title">🔒 已加密，请输入主密码</div>
+    <p class="muted small">数据文件已用主密码加密。忘记密码将无法恢复数据。</p>
+    <input type="password" id="unlockPassword" placeholder="主密码" autocomplete="off">
+    <div class="row gap">
+      <button class="btn primary grow" id="unlockBtn">解锁</button>
+    </div>
+    <div id="unlockError" class="error-text hidden"></div>
+  </div>
+</div>
+
+<!-- 头部 -->
+<header class="app-header">
+  <div class="header-inner">
+    <div class="brand">
+      <span class="brand-icon">🔑</span>
+      <div>
+        <h1>LLM API Key Vault</h1>
+      </div>
+    </div>
+    <div class="header-actions">
+      <span id="encBadge" class="badge"></span>
+      <button class="btn ghost" id="lockBtn" title="锁定并清除内存中的密钥">🔒 锁定</button>
+      <button class="btn ghost" id="passwordBtn">🔐 主密码设置</button>
+    </div>
+  </div>
+</header>
+
+<main class="container">
+
+  <!-- 工具栏 -->
+  <div class="toolbar">
+    <div class="search-wrap">
+      <input type="text" id="searchInput" placeholder="搜索名称 / URL / 备注…">
+    </div>
+    <select id="providerFilter" class="select"></select>
+    <button class="btn primary" id="addBtn">＋ 添加 API Key</button>
+  </div>
+
+  <!-- 卡片列表 -->
+  <div id="cardList" class="card-list"></div>
+
+  <!-- 空状态 -->
+  <div id="emptyState" class="empty hidden">
+    <div class="empty-icon">🗝️</div>
+    <p>还没有保存任何 API Key</p>
+    <p class="muted small">点击右上角「添加 API Key」开始管理你的密钥</p>
+  </div>
+</main>
+
+<!-- 编辑弹窗 -->
+<div id="editorOverlay" class="overlay hidden">
+  <div class="modal editor">
+    <div class="modal-title" id="editorTitle">添加 API Key</div>
+
+    <label class="field">
+      <span>名称 <em class="req">*</em></span>
+      <input type="text" id="fName" placeholder="例如：DeepSeek 官方">
+    </label>
+
+    <label class="field">
+      <span>供应商 <em class="req">*</em></span>
+      <select id="fProvider"></select>
+    </label>
+
+    <label class="field">
+      <span>Base URL <em class="req">*</em></span>
+      <input type="text" id="fBaseUrl" placeholder="https://api.example.com/v1" spellcheck="false">
+    </label>
+
+    <label class="field">
+      <span>API Key <em class="req">*</em></span>
+      <div class="input-with-btn">
+        <input type="password" id="fApiKey" placeholder="sk-…" spellcheck="false" autocomplete="off">
+        <button class="btn ghost icon" id="fKeyEye" title="显示/隐藏">👁</button>
+      </div>
+    </label>
+
+    <label class="field">
+      <span>默认模型（可选，用于生成代码示例）</span>
+      <input type="text" id="fModel" placeholder="例如：deepseek-chat" spellcheck="false">
+    </label>
+
+    <label class="field">
+      <span>备注（可选）</span>
+      <textarea id="fNotes" rows="2" placeholder="这个 Key 的用途、额度、有效期…"></textarea>
+    </label>
+
+    <!-- 自定义请求配置 -->
+    <div id="customConfig" class="custom-config hidden">
+      <div class="section-title">自定义测试请求</div>
+      <div class="grid-2">
+        <label class="field">
+          <span>请求方法</span>
+          <select id="fMethod">
+            <option>GET</option><option>POST</option>
+            <option>PUT</option><option>DELETE</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>请求路径</span>
+          <input type="text" id="fPath" placeholder="/v1/models" spellcheck="false">
+        </label>
+      </div>
+      <label class="field">
+        <span>鉴权方式</span>
+        <select id="fAuthMode">
+          <option value="bearer">Authorization: Bearer &lt;key&gt;</option>
+          <option value="apiKey">自定义请求头携带 Key（如 x-api-key）</option>
+          <option value="basic">HTTP Basic（用户名 + Key 作密码）</option>
+          <option value="query">URL 查询参数携带 Key（如 ?api_key=）</option>
+          <option value="none">无需鉴权</option>
+        </select>
+      </label>
+      <div id="authExtra" class="grid-2">
+        <label class="field">
+          <span>请求头名称</span>
+          <input type="text" id="fHeaderName" placeholder="x-api-key">
+        </label>
+        <label class="field">
+          <span>查询参数名</span>
+          <input type="text" id="fQueryParam" placeholder="api_key">
+        </label>
+        <label class="field">
+          <span>Basic 用户名</span>
+          <input type="text" id="fUsername" placeholder="可选">
+        </label>
+      </div>
+      <label class="field">
+        <span>额外请求头（JSON，可选）</span>
+        <input type="text" id="fHeaders" placeholder='{"anthropic-version": "2023-06-01"}' spellcheck="false">
+      </label>
+      <label class="field">
+        <span>请求体（可选）</span>
+        <textarea id="fBody" rows="3" spellcheck="false" placeholder='{"model": "xxx", "messages": []}'></textarea>
+      </label>
+    </div>
+
+    <!-- 弹窗内测试 -->
+    <div class="inline-test">
+      <button class="btn" id="draftTestBtn">🧪 测试当前配置</button>
+      <span id="draftTestResult" class="inline-test-result"></span>
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn ghost" id="editorCancel">取消</button>
+      <button class="btn primary" id="editorSave">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 代码片段弹窗 -->
+<div id="snippetOverlay" class="overlay hidden">
+  <div class="modal snippet">
+    <div class="modal-title">📋 代码片段</div>
+    <div class="tabs" id="snippetTabs"></div>
+    <pre class="snippet-pre"><code id="snippetCode"></code></pre>
+    <div class="modal-actions">
+      <button class="btn primary" id="snippetCopy">复制代码</button>
+      <button class="btn ghost" id="snippetClose">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- 密码设置弹窗 -->
+<div id="passwordOverlay" class="overlay hidden">
+  <div class="modal">
+    <div class="modal-title">🔐 主密码设置</div>
+    <p class="muted small" id="passwordStateText"></p>
+
+    <div id="pwChangeFields">
+      <label class="field">
+        <span>当前主密码</span>
+        <input type="password" id="pwCurrent" autocomplete="off">
+      </label>
+      <label class="field">
+        <span>新主密码（留空 = 关闭加密）</span>
+        <input type="password" id="pwNew" autocomplete="off" placeholder="建议使用较长的密码">
+      </label>
+      <label class="field">
+        <span>确认新主密码</span>
+        <input type="password" id="pwConfirm" autocomplete="off">
+      </label>
+    </div>
+    <div id="pwEnableFields" class="hidden">
+      <label class="field">
+        <span>设置主密码</span>
+        <input type="password" id="pwNew2" autocomplete="off" placeholder="建议使用较长的密码">
+      </label>
+      <label class="field">
+        <span>确认主密码</span>
+        <input type="password" id="pwConfirm2" autocomplete="off">
+      </label>
+    </div>
+    <div id="pwError" class="error-text hidden"></div>
+    <div class="modal-actions">
+      <button class="btn ghost" id="pwCancel">取消</button>
+      <button class="btn primary" id="pwSave">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div id="toasts" class="toasts"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
